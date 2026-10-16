@@ -20,7 +20,7 @@ jobs:
           path: state.json
           key: state-${{ github.run_id }}
           restore-keys: state-
-      - run: python3 watch.py --loop 60 --duration 290
+      - run: python3 watch.py --loop 60 --duration 230
         env:
           CHAT_BOT_TOKEN: ${{ secrets.CHAT_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
