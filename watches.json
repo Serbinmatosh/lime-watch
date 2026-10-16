@@ -2,8 +2,13 @@
   "watches": [
     {
       "url": "https://limestore.com/ru_ru/product/36682-1415_153_327_svetlo_olivkovyi_melanz",
-      "code": "1415_153_327_svetlo_olivkovyi_melanz",
-      "size": "S",
+      "size": ["XS", "S", "M"],
+      "stock": "online"
+    },
+    {
+      "url": "https://limestore.com/ru_ru/product/35649-9264_857_032_seryi_melanz",
+      "code": "9264_857_032_seryi_melanz",
+      "size": ["XS", "S", "M"],
       "stock": "online"
     }
   ]

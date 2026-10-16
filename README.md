@@ -22,7 +22,7 @@ Edit `watches.json`. Each entry has:
 | `url`   | a product page or a catalog page that lists the item |
 | `name`  | words that must all appear in the product name (optional) |
 | `code`  | exact product code, e.g. `9443_325_001_cernyi` (optional) |
-| `size`  | the size to watch, e.g. `S`, `M`, `42` |
+| `size`  | the size to watch, e.g. `"S"`, or a list: `["S", "M", "L"]` |
 | `stock` | `online` (default), `offline` (shops only) or `any` |
 
 Colours are separate products with separate codes, so use `code` to pin one colour.

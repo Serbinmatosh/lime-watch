@@ -89,16 +89,18 @@ def matches(product, watch):
 def check_watch(watch):
     """Return a list of (key, available, description) for each matching product."""
     mode = watch.get("stock", "online")
-    size = str(watch["size"]).casefold()
+    sizes = watch["size"] if isinstance(watch["size"], list) else [watch["size"]]
     results = []
     for product in find_products(fetch(watch["url"])):
         if not matches(product, watch):
             continue
-        skus = [s for s in product["skus"] if str((s.get("size") or {}).get("value", "")).casefold() == size]
-        available = any(sku_in_stock(s, mode) for s in skus)
         color = (product.get("color") or {}).get("name") or ""
-        desc = f"{product.get('name')} ({color}), size {watch['size']}, {product.get('price_formatted')}"
-        results.append((f"{product.get('code')}|{size}", available, desc))
+        for size in sizes:
+            wanted = str(size).casefold()
+            skus = [s for s in product["skus"] if str((s.get("size") or {}).get("value", "")).casefold() == wanted]
+            available = any(sku_in_stock(s, mode) for s in skus)
+            desc = f"{product.get('name')} ({color}), size {size}, {product.get('price_formatted')}"
+            results.append((f"{product.get('code')}|{wanted}", available, desc))
     return results
 
 
