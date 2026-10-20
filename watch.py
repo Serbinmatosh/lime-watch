@@ -23,8 +23,6 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-SESSION_COOKIE = os.environ.get("SESSION_COOKIE", "")
-
 WRAPPERS = {"ShallowReactive", "Reactive", "Ref", "ShallowRef", "EmptyRef", "EmptyShallowRef"}
 
 
@@ -42,40 +40,43 @@ def fetch_limestore(url):
 
 
 def fetch_ekonika(url):
-    """Heavy stealth browser request with session cookie magic."""
+    """Dynamically switch between automated browser environments and urllib."""
     from playwright.sync_api import sync_playwright
-    print(f"[STEALTH] Launching Playwright to perform magic on: {url}")
+
+    session_cookie_str = os.environ.get("SESSION_COOKIE", "")
+    if not session_cookie_str:
+        raise RuntimeError("SESSION_COOKIE environment variable is missing or empty.")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent=USER_AGENT,
             viewport={"width": 1280, "height": 800},
-            locale="ru-RU",
-            extra_http_headers={
-                "Origin": "https://ekonika.ru",
-                "Pragma": "no-cache",
-                "Referer": url
-            }
+            locale="ru-RU"
         )
 
         parsed_cookies = []
-        for item in SESSION_COOKIE.split(";"):
+        for item in session_cookie_str.split(";"):
             if "=" in item:
                 k, v = item.strip().split("=", 1)
-                parsed_cookies.append({"name": k, "value": v, "domain": ".ekonika.ru", "path": "/"})
-        context.add_cookies(parsed_cookies)
+                parsed_cookies.append({
+                    "name": k,
+                    "value": v,
+                    "domain": ".ekonika.ru",
+                    "path": "/"
+                })
 
+        context.add_cookies(parsed_cookies)
         page = context.new_page()
         page.add_init_script("delete navigator.__proto__.webdriver;")
 
         try:
             page.goto(url, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(5000)  # Wait in case of secondary checks
-            return page.content()
-        except Exception as e:
-            print(f"[STEALTH ERROR] Ekonika fetch failed: {e}", file=sys.stderr)
-            return ""
+            page.wait_for_timeout(5000)  # Wait for scripts to populate layout
+            html = page.content()
+            if "__NUXT_DATA__" not in html:
+                raise RuntimeError("Bypass signature verification failed (Nuxt layout missing).")
+            return html
         finally:
             browser.close()
 
@@ -287,8 +288,8 @@ def main():
     args = ap.parse_args()
 
     if args.test_telegram:
-        telegram("lime-watch: Telegram is set up correctly.")
-        print("sent")
+        telegram("lime-watch: Telegram connection verified successfully.")
+        print("Test confirmation notice sent to Telegram.")
         return 0
 
     with open(args.config, encoding="utf-8") as f:
