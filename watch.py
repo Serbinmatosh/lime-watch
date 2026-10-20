@@ -71,7 +71,7 @@ def fetch_ekonika(url):
         page.add_init_script("delete navigator.__proto__.webdriver;")
 
         try:
-            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(5000)  # Wait for scripts to populate layout
             html = page.content()
             if "__NUXT_DATA__" not in html:
