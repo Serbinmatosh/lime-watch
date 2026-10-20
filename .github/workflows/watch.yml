@@ -1,9 +1,7 @@
 name: watch
 
 on:
-  schedule:
-    - cron: "3-58/5 * * * *"
-  workflow_dispatch:
+  workflow_dispatch: # Allows you to trigger the run manually from the GitHub Actions tab
 
 concurrency:
   group: watch
@@ -12,15 +10,34 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python runtime environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install required script dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Playwright needs the actual browser binaries and OS dependencies installed to run headless
+          playwright install chromium --with-deps
+
+      - name: Restore execution state file cache
+        uses: actions/cache@v4
         with:
           path: state.json
           key: state-${{ github.run_id }}
           restore-keys: state-
-      - run: python3 watch.py --loop 60 --duration 230
+
+      - name: Execute stock tracking check
+        run: python3 watch.py --loop 60 --duration 230
         env:
           CHAT_BOT_TOKEN: ${{ secrets.CHAT_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          # Pass the cookie directly from GitHub Secrets to os.environ in your script
+          SESSION_COOKIE: ${{ secrets.SESSION_COOKIE }}

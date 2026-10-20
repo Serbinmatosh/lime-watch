@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Watch limestore.com items and send a Telegram message when a size is in stock.
+"""Watch store items and send a Telegram message when a size is in stock.
 
 Usage:
   python3 watch.py --once                    # check everything once and exit
@@ -21,17 +20,64 @@ import urllib.request
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+SESSION_COOKIE = os.environ.get("SESSION_COOKIE", "")
+
 WRAPPERS = {"ShallowReactive", "Reactive", "Ref", "ShallowRef", "EmptyRef", "EmptyShallowRef"}
 
 
-def fetch(url):
+def fetch_limestore(url):
+    """Fast, standard request for Limestore."""
     req = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ru,en;q=0.8"}
     )
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return resp.read().decode("utf-8", "replace")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.read().decode("utf-8", "replace")
+    except Exception as e:
+        print(f"[FETCH ERROR] Limestore fetch failed for {url}: {e}", file=sys.stderr)
+        return ""
+
+
+def fetch_ekonika(url):
+    """Heavy stealth browser request with session cookie magic."""
+    from playwright.sync_api import sync_playwright
+    print(f"[STEALTH] Launching Playwright to perform magic on: {url}")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width": 1280, "height": 800},
+            locale="ru-RU",
+            extra_http_headers={
+                "Origin": "https://ekonika.ru",
+                "Pragma": "no-cache",
+                "Referer": url
+            }
+        )
+
+        parsed_cookies = []
+        for item in SESSION_COOKIE.split(";"):
+            if "=" in item:
+                k, v = item.strip().split("=", 1)
+                parsed_cookies.append({"name": k, "value": v, "domain": ".ekonika.ru", "path": "/"})
+        context.add_cookies(parsed_cookies)
+
+        page = context.new_page()
+        page.add_init_script("delete navigator.__proto__.webdriver;")
+
+        try:
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(5000)  # Wait in case of secondary checks
+            return page.content()
+        except Exception as e:
+            print(f"[STEALTH ERROR] Ekonika fetch failed: {e}", file=sys.stderr)
+            return ""
+        finally:
+            browser.close()
 
 
 def revive(arr, index, memo):
@@ -57,17 +103,20 @@ def revive(arr, index, memo):
     return value
 
 
-def find_products(html):
-    """Return every product in the page payload that has a list of skus."""
+def find_products_in_nuxt(html, url):
+    """Extract and revive all product data from the Nuxt payload."""
     match = re.search(r'<script[^>]*id="__NUXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
     if not match:
-        raise RuntimeError("page has no __NUXT_DATA__ payload (site layout changed?)")
+        raise RuntimeError(f"Page has no __NUXT_DATA__ payload (blocked by Qrator or layout changed): {url}")
+
     arr = json.loads(match.group(1))
     memo = {}
     products = []
+
     for i, entry in enumerate(arr):
-        if isinstance(entry, dict) and "skus" in entry and "code" in entry:
+        if isinstance(entry, dict) and "code" in entry and ("skus" in entry or "offers" in entry):
             products.append(revive(arr, i, memo))
+
     return products
 
 
@@ -77,7 +126,17 @@ def sku_in_stock(sku, mode):
     return {"online": online, "offline": offline, "any": online + offline}[mode] > 0
 
 
-def matches(product, watch):
+def product_sizes(product, mode):
+    """Yield (size, in_stock) for each size from either skus (Lime) or offers (Ekonika)."""
+    for sku in product.get("skus") or []:
+        yield str((sku.get("size") or {}).get("value", "")), sku_in_stock(sku, mode)
+    for offer in product.get("offers") or []:
+        # Ekonika uses offer -> title for size, and quantity for stock
+        yield str(offer.get("title", "")), (offer.get("quantity") or 0) > 0
+
+
+def matches_limestore(product, watch):
+    """Original Limestore matching logic."""
     code = (watch.get("code") or "").casefold()
     if code and code != (product.get("code") or "").casefold():
         return False
@@ -86,30 +145,88 @@ def matches(product, watch):
     return all(w in name for w in words)
 
 
-def check_watch(watch):
-    """Return a list of (key, available, description) for each matching product."""
+def matches_ekonika(product, watch):
+    """Stricter Ekonika matching logic to filter out recommended products/accessories."""
+    prod_code = (product.get("code") or "").casefold()
+    watch_code = (watch.get("code") or "").casefold()
+    url = (watch.get("url") or "").casefold()
+
+    if watch_code:
+        if watch_code != prod_code:
+            return False
+    elif prod_code and prod_code not in url:
+        return False
+
+    words = (watch.get("name") or "").casefold().split()
+    name = (product.get("name") or "").casefold()
+    return all(w in name for w in words)
+
+
+def parse_nuxt_data(html, watch, store_name):
+    """Universal parser for stores using Nuxt.js."""
+    results = []
     mode = watch.get("stock", "online")
     sizes = watch["size"] if isinstance(watch["size"], list) else [watch["size"]]
-    results = []
-    for product in find_products(fetch(watch["url"])):
-        if not matches(product, watch):
-            continue
-        color = (product.get("color") or {}).get("name") or ""
+
+    for product in find_products_in_nuxt(html, watch["url"]):
+        # Route to the correct matching logic based on the store
+        if store_name == "Ekonika":
+            if not matches_ekonika(product, watch):
+                continue
+        else:
+            if not matches_limestore(product, watch):
+                continue
+
+        color = product.get("color") or {}
+        if isinstance(color, dict):
+            if color.get("value") and isinstance(color["value"], list):
+                color_name = color["value"][0].get("name", "")
+            else:
+                color_name = color.get("name", "")
+        else:
+            color_name = str(color)
+
+        price = product.get("price_formatted") or (product.get("price") or {}).get("price") or "Price Hidden"
+        stocks = list(product_sizes(product, mode))
+
         for size in sizes:
             wanted = str(size).casefold()
-            skus = [s for s in product["skus"] if str((s.get("size") or {}).get("value", "")).casefold() == wanted]
-            available = any(sku_in_stock(s, mode) for s in skus)
-            desc = f"{product.get('name')} ({color}), size {size}, {product.get('price_formatted')}"
+            available = any(ok for s, ok in stocks if s.casefold() == wanted)
+
+            title = product.get("title") or product.get("name")
+            desc_color = f" ({color_name})" if color_name else ""
+            desc = f"{store_name}: {title}{desc_color}, size {size}, {price}"
             results.append((f"{product.get('code')}|{wanted}", available, desc))
+
     return results
 
 
+def check_watch(watch):
+    """Fetch URL and process its Nuxt payload."""
+    url = watch["url"]
+
+    if "ekonika.ru" in url.lower():
+        html = fetch_ekonika(url)
+        if not html:
+            return []
+        return parse_nuxt_data(html, watch, "Ekonika")
+    else:
+        html = fetch_limestore(url)
+        if not html:
+            return []
+        return parse_nuxt_data(html, watch, "Limestore")
+
+
 def telegram(text):
-    token, chat = os.environ.get("CHAT_BOT_TOKEN"), os.environ.get("CHAT_ID")
+    """Dispatches real-time inventory notifications via the Telegram API."""
+    token = os.environ.get("CHAT_BOT_TOKEN")
+    chat = os.environ.get("CHAT_ID")
     if not token or not chat:
-        raise RuntimeError("set CHAT_BOT_TOKEN and CHAT_ID")
+        raise RuntimeError("set CHAT_BOT_TOKEN and CHAT_ID environment variables")
+
     data = urllib.parse.urlencode({"chat_id": chat, "text": text, "disable_web_page_preview": "true"})
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+
     with urllib.request.urlopen(url, data=data.encode(), timeout=20) as resp:
         resp.read()
 
@@ -123,27 +240,39 @@ def load_state(path):
 
 
 def run_once(watches, state, dry_run):
-    ok = True
+    overall_success = True
+
     for watch in watches:
+        print(f"\n[EXECUTION] Checking URL: {watch['url']}")
+        print(f"[EXECUTION] Target Sizes: {watch['size']}")
+
         try:
             results = check_watch(watch)
-        except Exception as exc:  # network hiccup, layout change, ...
-            print(f"error checking {watch['url']}: {exc}", file=sys.stderr)
-            ok = False
+
+            if not results:
+                print(f"[WARNING] No products/sizes matched criteria on the page.")
+                continue
+
+            for key, available, desc in results:
+                status_label = "🟢 IN STOCK" if available else "🔴 OUT OF STOCK"
+                print(f"[RESULT] {status_label} -> {desc}")
+
+                if available and state.get(key) is not True:
+                    message = f"In stock: {desc}\n{watch['url']}"
+                    if dry_run:
+                        print(f"[DRY-RUN ALERT] Would dispatch Telegram: {message}")
+                    else:
+                        telegram(message)
+                        print(f"[NOTIFICATION] Alert successfully sent to Telegram.")
+
+                state[key] = available
+
+        except Exception as exc:
+            print(f"[FATAL ITEM ERROR] Failed parsing {watch['url']}: {exc}", file=sys.stderr)
+            overall_success = False
             continue
-        if not results:
-            print(f"no product matched {watch}", file=sys.stderr)
-            ok = False
-        for key, available, desc in results:
-            print(f"{'IN STOCK' if available else 'out'}  {desc}")
-            if available and state.get(key) is not True:
-                message = f"In stock: {desc}\n{watch['url']}"
-                if dry_run:
-                    print(f"[dry-run] would send: {message}")
-                else:
-                    telegram(message)
-            state[key] = available
-    return ok
+
+    return overall_success
 
 
 def main():
